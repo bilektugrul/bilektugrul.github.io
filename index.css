@@ -35,6 +35,24 @@ body {
     z-index: 100;
 }
 
+#skript-name {
+    position: relative;
+    top: 120px;
+    text-align: center;
+    color: rgb(231, 231, 231);
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 50px;
+}
+
+#skript-description {
+    position: relative;
+    top: 140px;
+    text-align: center;
+    color: rgb(143, 143, 143);
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 25px;
+}
+
 .discord {
     position: fixed;
     top: 10px;
