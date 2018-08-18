@@ -3,7 +3,8 @@
         <title>Ender Furnace</title>
     </head>
     <body>
-        on place of furnace:
+        <textarea rows="80" cols="100">
+            on place of furnace:
 	if {enderFurnace::furnaceLocation::%player%} isn't set:
 		set {enderFurnace::furnaceLocation::%player%} to event-block's location
 		set {enderFurnace::furnaceOwner::%event-block's location%} to player
@@ -43,5 +44,6 @@ command /enderFurnace:
 			send "Bir fırının var." and "Lokasyonu: %{enderFurnace::furnaceLocation::%player%}%"
 		else:
 			send "Bir fırının yok."
+        </textarea>
     </body>
 </html>
