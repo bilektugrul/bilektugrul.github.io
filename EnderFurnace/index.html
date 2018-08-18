@@ -4,46 +4,46 @@
     </head>
     <body>
         <textarea rows="80" cols="100">
-            on place of furnace:
-	if {enderFurnace::furnaceLocation::%player%} isn't set:
-		set {enderFurnace::furnaceLocation::%player%} to event-block's location
-		set {enderFurnace::furnaceOwner::%event-block's location%} to player
-		send "Ender Furnace kuruldu, kırarak taşıyabilirsin." and "Lokasyonu: %event-block's location%"
-		send "Kaybedersen /enderFurnace komutu ile bulabilirsin."
-	else:
-		cancel event
-		send "Senin zaten bir fırının var." and "/enderFurnace komutu ile yerine bakabilirsin."
-on break of furnace:
-	if {enderFurnace::furnaceOwner::%event-block's location%} is set:
-		if {enderFurnace::furnaceOwner::%event-block's location%} is player:
-			delete {enderFurnace::furnaceLocation::%player%}
-			delete {enderFurnace::furnaceOwner::%event-block's location%}
-			wait a tick
-			loop entities in radius 5 of event-block:
-				delete loop-entity's item
-			send "Fırınını kırdın." and "Yeniden bir yere koyduğunda içindeki eşyalar yine fırında olacak."
-		else:
-			cancel event
-			send "Bu fırın senin değil."
-on rightclick on furnace:
-	if {enderFurnace::furnaceOwner::%event-block's location%} is set:
-		if {enderFurnace::furnaceOwner::%event-block's location%} isn't player:
-			cancel event
-			send "Bu fırın senin değil."
-on inventory close:
-	if "%event-inventory%" contains "CraftFurnace":
-		set {enderFurnace::FurnaceSlot1::%player%} to slot 0 of event-inventory
-		set {enderFurnace::FurnaceSlot2::%player%} to slot 1 of event-inventory
-on inventory open:
-	if "%event-inventory%" contains "CraftFurnace":
-		set slot 0 of event-inventory to {enderFurnace::FurnaceSlot1::%player%}
-		set slot 1 of event-inventory to {enderFurnace::FurnaceSlot2::%player%}
-command /enderFurnace:
-	trigger:
-		if {enderFurnace::furnaceLocation::%player%} is set:
-			send "Bir fırının var." and "Lokasyonu: %{enderFurnace::furnaceLocation::%player%}%"
-		else:
-			send "Bir fırının yok."
+			on place of furnace:
+				if {enderFurnace::furnaceLocation::%player%} isn't set:
+					set {enderFurnace::furnaceLocation::%player%} to event-block's location
+					set {enderFurnace::furnaceOwner::%event-block's location%} to player
+					send "Ender Furnace kuruldu, kırarak taşıyabilirsin." and "Lokasyonu: %event-block's location%"
+					send "Kaybedersen /enderFurnace komutu ile bulabilirsin."
+				else:
+					cancel event
+					send "Senin zaten bir fırının var." and "/enderFurnace komutu ile yerine bakabilirsin."
+			on break of furnace:
+				if {enderFurnace::furnaceOwner::%event-block's location%} is set:
+					if {enderFurnace::furnaceOwner::%event-block's location%} is player:
+						delete {enderFurnace::furnaceLocation::%player%}
+						delete {enderFurnace::furnaceOwner::%event-block's location%}
+						wait a tick
+						loop entities in radius 5 of event-block:
+							delete loop-entity's item
+						send "Fırınını kırdın." and "Yeniden bir yere koyduğunda içindeki eşyalar yine fırında olacak."
+					else:
+						cancel event
+						send "Bu fırın senin değil."
+			on rightclick on furnace:
+				if {enderFurnace::furnaceOwner::%event-block's location%} is set:
+					if {enderFurnace::furnaceOwner::%event-block's location%} isn't player:
+						cancel event
+						send "Bu fırın senin değil."
+			on inventory close:
+				if "%event-inventory%" contains "CraftFurnace":
+					set {enderFurnace::FurnaceSlot1::%player%} to slot 0 of event-inventory
+					set {enderFurnace::FurnaceSlot2::%player%} to slot 1 of event-inventory
+			on inventory open:
+				if "%event-inventory%" contains "CraftFurnace":
+					set slot 0 of event-inventory to {enderFurnace::FurnaceSlot1::%player%}
+					set slot 1 of event-inventory to {enderFurnace::FurnaceSlot2::%player%}
+			command /enderFurnace:
+				trigger:
+					if {enderFurnace::furnaceLocation::%player%} is set:
+						send "Bir fırının var." and "Lokasyonu: %{enderFurnace::furnaceLocation::%player%}%"
+					else:
+						send "Bir fırının yok."
         </textarea>
     </body>
 </html>
