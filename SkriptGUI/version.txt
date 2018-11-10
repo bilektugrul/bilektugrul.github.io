@@ -1,0 +1,2 @@
+Latest version: 0.4
+Update link: https://github.com/bilektugrul/SkriptGUI/releases/tag/0.4
