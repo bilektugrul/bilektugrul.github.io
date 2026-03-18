@@ -1,0 +1,1349 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark" data-palette="classic">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scrobble Telemetry</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body data-design="classic">
+
+    <div id="greeting-screen">
+        <div class="greeting-container">
+            <h1>Telemetry Initialization</h1>
+            <p>Please drop your Last.fm data exports to begin the analysis engine.</p>
+            <div class="dropzone-container">
+                <div class="dropzone" id="dz-db">
+                    <div class="dz-bg" id="bg-db"></div>
+                    <div class="dz-spinner" id="sp-db"></div>
+                    <div class="dz-content">
+                        <h3>1. Track Database</h3>
+                        <p>unique_tracks.json</p>
+                    </div>
+                </div>
+                <div class="dropzone disabled" id="dz-tl">
+                    <div class="dz-bg" id="bg-tl"></div>
+                    <div class="dz-spinner" id="sp-tl"></div>
+                    <div class="dz-content">
+                        <h3>2. Timeline Data</h3>
+                        <p>scrobbles.json</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="app-content">
+        <div id="app-layout">
+            <aside id="sidebar">
+                <header>
+                    <h1>Scrobble Telemetry</h1>
+                    <div class="controls-row">
+                        
+                        <div class="file-group">
+                            <label>1. Database Update</label>
+                            <input type="file" id="dbInput" accept=".json">
+                        </div>
+                        <div class="file-group">
+                            <label>2. Timeline Update</label>
+                            <input type="file" id="fileInput" accept=".json">
+                        </div>
+                        
+                        <div style="display: flex; gap: 10px; width: 100%;">
+                            <div class="file-group" style="flex: 1;">
+                                <label>Theme</label>
+                                <select id="themeSelect" onchange="document.documentElement.setAttribute('data-theme', this.value)">
+                                    <option value="dark">Dark</option>
+                                    <option value="amoled">AMOLED</option>
+                                    <option value="light">Bright</option>
+                                </select>
+                            </div>
+                            <div class="file-group" style="flex: 1;">
+                                <label>Palette</label>
+                                <select id="paletteSelect" onchange="document.documentElement.setAttribute('data-palette', this.value)">
+                                    <option value="classic">Classic Red</option>
+                                    <option value="bright">Bright Blue</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="file-group" style="width: 100%;">
+                            <label>Layout Design</label>
+                            <select id="designSelect" onchange="document.body.setAttribute('data-design', this.value)">
+                                <option value="classic">Classic</option>
+                                <option value="classic-last-fm">Classic Last.fm</option>
+                                <option value="side-focused">Side-Focused</option>
+                                <option value="side-focused-last-fm-like">Last.fm Style</option>
+                                <option value="bento">Reimagined Bento</option>
+                            </select>
+                        </div>
+                        <span id="loading">Processing Data...</span>
+                    </div>
+                </header>
+                <div class="tabs" id="tabNav"></div>
+            </aside>
+            <div id="main-area">
+                <main id="tabViews"></main>
+            </div>
+        </div>
+    </div>
+    
+    <div id="toast">Prompt Copied to Clipboard!</div>
+    <div id="datalists-container"></div>
+
+    <script>
+        const db = {
+            global: { total: 0, totalDuration: 0, tracks: new Map(), artists: new Map(), albums: new Map(), days: new Map(), months: new Map(), years: new Map() },
+            years: new Map(), 
+            reports: { years: new Map(), months: new Map(), weeks: new Map() }, 
+            globalLastPlayed: new Map(),
+            history: [],
+            images: new Map() 
+        };
+
+        const renderState = new Map();
+        const debounceTimers = new Map();
+        const officialTrackDurations = new Map(); 
+
+        let histDebounceTimer;
+        let datasetNow = 0;
+        let currentActiveTabId = 'tab-main';
+
+        const aiBtnBottomHTML = `<button class="btn-ai-bottom" onclick="generateCurrentTabAIPrompt()">✨ Summarize this Page to AI Prompt</button>`;
+
+        // ==========================================
+        // GREETING SCREEN & FILE INGESTION LOGIC
+        // ==========================================
+        function setupDropzone(dzId, bgId, spId, acceptType, onFileCallback) {
+            const dz = document.getElementById(dzId);
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = acceptType;
+            input.hidden = true;
+            dz.appendChild(input);
+
+            dz.addEventListener('click', () => { if (!dz.classList.contains('disabled')) input.click(); });
+            input.addEventListener('change', (e) => {
+                if (e.target.files.length) onFileCallback(e.target.files[0], dz, document.getElementById(bgId), document.getElementById(spId));
+            });
+
+            dz.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                if (!dz.classList.contains('disabled')) dz.classList.add('dragover');
+            });
+            dz.addEventListener('dragleave', (e) => {
+                e.preventDefault();
+                dz.classList.remove('dragover');
+            });
+            dz.addEventListener('drop', (e) => {
+                e.preventDefault();
+                dz.classList.remove('dragover');
+                if (!dz.classList.contains('disabled') && e.dataTransfer.files.length) {
+                    onFileCallback(e.dataTransfer.files[0], dz, document.getElementById(bgId), document.getElementById(spId));
+                }
+            });
+        }
+
+        async function processDatabaseFile(file, dz, bg, sp) {
+            if(sp) sp.classList.add('active');
+            let fakeProg = 0;
+            let pInterval = null;
+            if(bg) pInterval = setInterval(() => { fakeProg += 10; if(fakeProg <= 90) bg.style.width = fakeProg + '%'; }, 50);
+
+            try {
+                const text = await file.text();
+                const data = JSON.parse(text);
+                
+                for (const t of data) {
+                    if (!t || !t.name || !t.artist) continue;
+                    const artistName = typeof t.artist === 'string' ? t.artist : t.artist.name;
+                    const trackName = t.name;
+                    const trackKey = `${trackName}|||${artistName}`;
+                    
+                    const durationMs = parseInt(t.duration) || 0;
+                    if (durationMs > 0) officialTrackDurations.set(trackKey, Math.floor(durationMs / 1000));
+
+                    if (t.album && t.album.image && Array.isArray(t.album.image)) {
+                        let img = t.album.image.find(i => i.size === 'extralarge' || i.size === 'large');
+                        if (!img && t.album.image.length > 0) img = t.album.image[t.album.image.length - 1];
+                        if (img && img['#text']) {
+                            db.images.set(trackKey, img['#text']);
+                            db.images.set(`${t.album.title||'Unknown'}|||${artistName}`, img['#text']);
+                            if (!db.images.has(artistName)) db.images.set(artistName, img['#text']); 
+                        }
+                    }
+                }
+                
+                if(pInterval) clearInterval(pInterval);
+                if(bg) bg.style.width = '100%';
+                if(dz) {
+                    setTimeout(() => {
+                        sp.classList.remove('active');
+                        dz.classList.add('success');
+                        dz.querySelector('h3').innerText = 'Database Linked';
+                        document.getElementById('dz-tl').classList.remove('disabled');
+                    }, 300);
+                }
+            } catch (err) {
+                if(pInterval) clearInterval(pInterval);
+                if(sp) sp.classList.remove('active');
+                alert("Failed to parse unique_tracks.json. Please ensure it is the correct file.");
+            }
+        }
+
+        async function processTimelineFile(file, dz, bg, sp) {
+            if(sp) sp.classList.add('active');
+            try {
+                const text = await file.text();
+                const data = JSON.parse(text);
+                await processDataAsync(data, (percent) => {
+                    if(bg) bg.style.width = percent + '%';
+                });
+                
+                if(sp) sp.classList.remove('active');
+                if(dz) {
+                    dz.classList.add('success');
+                    dz.querySelector('h3').innerText = 'Telemetry Processed';
+                    
+                    setTimeout(() => {
+                        const screen = document.getElementById('greeting-screen');
+                        const app = document.getElementById('app-content');
+                        screen.style.opacity = '0';
+                        setTimeout(() => {
+                            screen.style.display = 'none';
+                            app.style.display = 'block';
+                            setTimeout(() => app.style.opacity = '1', 50);
+                        }, 600);
+                    }, 800);
+                }
+            } catch (err) {
+                console.error(err);
+                if(sp) sp.classList.remove('active');
+                alert("Failed to process timeline data.");
+            }
+        }
+
+        setupDropzone('dz-db', 'bg-db', 'sp-db', '.json', processDatabaseFile);
+        setupDropzone('dz-tl', 'bg-tl', 'sp-tl', '.json', processTimelineFile);
+
+        document.getElementById('dbInput').addEventListener('change', (e) => {
+            if (e.target.files.length) processDatabaseFile(e.target.files[0], null, null, null).then(() => alert("Database Updated."));
+        });
+        document.getElementById('fileInput').addEventListener('change', (e) => {
+            if (officialTrackDurations.size === 0) {
+                alert("Please upload your Track Database first."); return;
+            }
+            if (e.target.files.length) {
+                document.getElementById('loading').style.display = 'inline';
+                processTimelineFile(e.target.files[0], null, null, null).then(() => document.getElementById('loading').style.display = 'none');
+            }
+        });
+
+        // ==========================================
+        // TELEMETRY PROCESSING ALGORITHM
+        // ==========================================
+        async function processDataAsync(data, progressCallback) {
+            db.global = { total: 0, totalDuration: 0, tracks: new Map(), artists: new Map(), albums: new Map(), days: new Map(), months: new Map(), years: new Map() };
+            db.years.clear();
+            db.reports = { years: new Map(), months: new Map(), weeks: new Map() };
+            db.globalLastPlayed.clear();
+            db.history = [];
+            datasetNow = 0;
+
+            const validData = data.filter(t => t.date && t.date.uts);
+            validData.sort((a, b) => parseInt(a.date.uts) - parseInt(b.date.uts));
+
+            const CHUNK_SIZE = 10000; 
+            
+            for (let i = 0; i < validData.length; i += CHUNK_SIZE) {
+                const chunk = validData.slice(i, i + CHUNK_SIZE);
+                
+                for (let j = 0; j < chunk.length; j++) {
+                    const track = chunk[j];
+                    const timestamp = parseInt(track.date.uts);
+                    const dateObj = new Date(timestamp * 1000);
+                    
+                    const year = dateObj.getFullYear().toString();
+                    const monthKey = `${year}-${String(dateObj.getMonth() + 1).padStart(2, '0')}`;
+                    const dayKey = `${monthKey}-${String(dateObj.getDate()).padStart(2, '0')}`;
+                    
+                    const monDate = new Date(dateObj);
+                    const dayOfWeek = monDate.getDay();
+                    const diffDays = monDate.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1);
+                    monDate.setDate(diffDays);
+                    const weekKey = `Week of ${monDate.getFullYear()}-${String(monDate.getMonth() + 1).padStart(2, '0')}-${String(monDate.getDate()).padStart(2, '0')}`;
+
+                    const artist = (typeof track.artist === 'string' ? track.artist : track.artist?.["#text"]) || "Unknown Artist";
+                    const title = track.name || "Unknown Track";
+                    const albumName = (typeof track.album === 'string' ? track.album : track.album?.["#text"]) || "Unknown Album";
+                    
+                    const trackKey = `${title}|||${artist}`;
+                    const albumKey = `${albumName}|||${artist}`;
+
+                    if (!db.images.has(trackKey) && track.image && Array.isArray(track.image)) {
+                        let img = track.image.find(i => i.size === 'extralarge' || i.size === 'large');
+                        if (!img && track.image.length > 0) img = track.image[track.image.length - 1];
+                        if (img && img['#text']) {
+                            db.images.set(trackKey, img['#text']);
+                            db.images.set(albumKey, img['#text']);
+                            if (!db.images.has(artist)) db.images.set(artist, img['#text']);
+                        }
+                    }
+
+                    let durationSec = officialTrackDurations.get(trackKey);
+                    if (!durationSec) durationSec = 210; 
+
+                    if (!db.globalLastPlayed.has(trackKey) || timestamp > db.globalLastPlayed.get(trackKey)) {
+                        db.globalLastPlayed.set(trackKey, timestamp);
+                    }
+                    if (timestamp > datasetNow) datasetNow = timestamp;
+
+                    db.global.total++;
+                    db.global.totalDuration += durationSec;
+
+                    increment(db.global.tracks, trackKey);
+                    increment(db.global.artists, artist);
+                    increment(db.global.albums, albumKey);
+                    increment(db.global.days, dayKey);
+                    increment(db.global.months, monthKey);
+                    increment(db.global.years, year);
+
+                    if (!db.years.has(year)) {
+                        db.years.set(year, {
+                            total: 0, totalDuration: 0, tracks: new Map(), artists: new Map(), albums: new Map(), 
+                            days: new Map(), months: new Map(), monthData: new Map()
+                        });
+                    }
+                    
+                    const yStats = db.years.get(year);
+                    yStats.total++;
+                    yStats.totalDuration += durationSec;
+                    increment(yStats.tracks, trackKey);
+                    increment(yStats.artists, artist);
+                    increment(yStats.albums, albumKey);
+                    increment(yStats.days, dayKey);
+                    increment(yStats.months, monthKey);
+
+                    if (!yStats.monthData.has(monthKey)) yStats.monthData.set(monthKey, { totalDuration: 0, tracks: new Map(), artists: new Map(), albums: new Map(), days: new Map() });
+                    const mStats = yStats.monthData.get(monthKey);
+                    mStats.totalDuration += durationSec;
+                    increment(mStats.tracks, trackKey);
+                    increment(mStats.artists, artist);
+                    increment(mStats.albums, albumKey);
+                    increment(mStats.days, dayKey);
+
+                    function trackReport(mapCategory, key) {
+                        if (!mapCategory.has(key)) mapCategory.set(key, { total: 0, totalDuration: 0, tracks: new Map(), artists: new Map(), albums: new Map(), days: new Map() });
+                        const r = mapCategory.get(key);
+                        r.total++;
+                        r.totalDuration += durationSec;
+                        increment(r.tracks, trackKey);
+                        increment(r.artists, artist);
+                        increment(r.albums, albumKey);
+                        increment(r.days, dayKey);
+                    }
+                    trackReport(db.reports.years, year);
+                    trackReport(db.reports.months, monthKey);
+                    trackReport(db.reports.weeks, weekKey);
+
+                    db.history.push({
+                        title: title, artist: artist, album: albumName,
+                        timestamp: timestamp, dateStr: dateObj.toLocaleString(),
+                        year: year, month: monthKey, week: weekKey, day: dayKey,
+                        duration: durationSec
+                    });
+                }
+                
+                if (progressCallback) {
+                    const pct = Math.min(100, Math.round(((i + CHUNK_SIZE) / validData.length) * 100));
+                    progressCallback(pct);
+                }
+                await new Promise(r => setTimeout(r, 0));
+            }
+
+            const dlContainer = document.getElementById('datalists-container');
+            let dlArtists = `<datalist id="dl-artists">` + getTop(db.global.artists).slice(0, 5000).map(i => `<option value="${(i[0]||'').replace(/"/g, '&quot;')}">`).join('') + `</datalist>`;
+            let dlAlbums = `<datalist id="dl-albums">` + getTop(db.global.albums).slice(0, 5000).map(i => { const p = (i[0]||'').split('|||'); return `<option value="${(p[0]||'').replace(/"/g, '&quot;')} - ${(p[1]||'').replace(/"/g, '&quot;')}">`; }).join('') + `</datalist>`;
+            let dlSongs = `<datalist id="dl-songs">` + getTop(db.global.tracks).slice(0, 5000).map(i => { const p = (i[0]||'').split('|||'); return `<option value="${(p[0]||'').replace(/"/g, '&quot;')} - ${(p[1]||'').replace(/"/g, '&quot;')}">`; }).join('') + `</datalist>`;
+            dlContainer.innerHTML = dlArtists + dlAlbums + dlSongs;
+
+            buildUI();
+            currentActiveTabId = 'tab-main'; 
+        }
+
+        // ==========================================
+        // UTILITIES & STAT HELPERS
+        // ==========================================
+        function increment(map, key) { map.set(key, (map.get(key) || 0) + 1); }
+        function getTop(map) { return [...map.entries()].sort((a, b) => b[1] - a[1]); }
+        function getMissing(sourceMap, targetMap) {
+            if (!sourceMap) return [];
+            let missing = [];
+            for (let [key, val] of sourceMap.entries()) {
+                if (!targetMap.has(key)) missing.push([key, val]);
+            }
+            return missing.sort((a, b) => b[1] - a[1]);
+        }
+
+        function formatDurationStr(totalSeconds) {
+            const days = Math.floor(totalSeconds / 86400);
+            const hours = Math.floor((totalSeconds % 86400) / 3600);
+            const mins = Math.floor((totalSeconds % 3600) / 60);
+            let res = [];
+            if (days > 0) res.push(`${days}d`);
+            if (hours > 0) res.push(`${hours}h`);
+            if (mins > 0) res.push(`${mins}m`);
+            if (res.length === 0) return "< 1m";
+            return res.join(' ');
+        }
+
+        function calculateStreak(daysMap) {
+            if (!daysMap || daysMap.size === 0) return { count: 0, start: '', end: '' };
+            const sortedDays = [...daysMap.keys()].sort();
+            let maxStreak = 1;
+            let currentStreak = 1;
+            let currentStart = sortedDays[0];
+            let maxStart = sortedDays[0];
+            let maxEnd = sortedDays[0];
+
+            for (let i = 1; i < sortedDays.length; i++) {
+                const prev = new Date(sortedDays[i - 1] + 'T00:00:00');
+                const curr = new Date(sortedDays[i] + 'T00:00:00');
+                const diffTime = Math.abs(curr - prev);
+                const diffDays = Math.round(diffTime / (1000 * 60 * 60 * 24)); 
+                
+                if (diffDays === 1) {
+                    currentStreak++;
+                    if (currentStreak > maxStreak) {
+                        maxStreak = currentStreak;
+                        maxStart = currentStart;
+                        maxEnd = sortedDays[i];
+                    }
+                } else if (diffDays > 1) {
+                    currentStreak = 1;
+                    currentStart = sortedDays[i];
+                }
+            }
+
+            const formatShortDate = (dStr) => {
+                if (!dStr) return '';
+                const parts = dStr.split('-');
+                if(parts.length === 3) {
+                    const date = new Date(parts[0], parts[1]-1, parts[2]);
+                    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+                }
+                return dStr;
+            };
+
+            if (maxStreak === 1) {
+                maxStart = sortedDays[0];
+                maxEnd = sortedDays[0];
+            }
+
+            return { count: maxStreak, start: formatShortDate(maxStart), end: formatShortDate(maxEnd) };
+        }
+
+        function calculateCurrentStreak(daysMap) {
+            if (!daysMap || daysMap.size === 0) return 0;
+            const sortedDays = [...daysMap.keys()].sort();
+            let currentStreak = 1;
+            
+            for (let i = sortedDays.length - 1; i > 0; i--) {
+                const curr = new Date(sortedDays[i] + 'T00:00:00');
+                const prev = new Date(sortedDays[i - 1] + 'T00:00:00');
+                const diffTime = Math.abs(curr - prev);
+                const diffDays = Math.round(diffTime / (1000 * 60 * 60 * 24)); 
+                
+                if (diffDays === 1) {
+                    currentStreak++;
+                } else {
+                    break;
+                }
+            }
+            return currentStreak;
+        }
+
+        function buildComparison(currValue, compValue, label, isTime = false) {
+            if (compValue === null || compValue === undefined) return `<div class="stat-comp"><span>vs ${label}</span><span>N/A</span></div>`;
+            const diff = currValue - compValue;
+            if (Math.abs(diff) < 0.01) return `<div class="stat-comp"><span>vs ${label}</span><span>No change</span></div>`;
+            
+            const sign = diff > 0 ? '▲' : '▼';
+            const colorClass = diff > 0 ? 'up' : 'down';
+            const pctStr = compValue > 0 ? `${Math.round(Math.abs(diff / compValue) * 100)}%` : 'New';
+            
+            let diffFmt = isTime ? formatDurationStr(Math.abs(diff)) : (Number.isInteger(currValue) ? Math.abs(diff) : Math.abs(diff).toFixed(1));
+            return `<div class="stat-comp"><span>vs ${label}</span><span class="stat-comp-val ${colorClass}">${sign} ${pctStr} (${diff > 0 ? '+' : '-'}${diffFmt})</span></div>`;
+        }
+
+        function miniComp(curr, comp, label) {
+            if (comp === null || comp === undefined) return `<span style="color: var(--text-muted);">${label}: N/A</span>`;
+            if (comp === 0) return `<span style="color: #4caf50;">${label}: ▲ New (+${curr})</span>`;
+            if (curr === comp) return `<span style="color: var(--text-muted);">${label}: - 0% (0)</span>`;
+            const diff = curr - comp;
+            const pct = Math.round(Math.abs(diff / comp) * 100);
+            const sign = diff > 0 ? '▲' : '▼';
+            const diffSign = diff > 0 ? '+' : '';
+            const color = diff > 0 ? '#4caf50' : 'var(--accent)';
+            return `<span style="color: ${color};">${label}: ${sign} ${pct}% (${diffSign}${diff})</span>`;
+        }
+
+        function buildReportStatsRight(key, curr, prevMap, nextMap) {
+            const prev = prevMap ? (prevMap.get(key) || 0) : null;
+            const next = nextMap ? (nextMap.get(key) || 0) : null;
+            return `<div style="text-align: right; pointer-events: none; min-width: 130px;"><span class="val">${curr}</span><div style="font-size: 0.7rem; display: flex; flex-direction: column; gap: 2px; margin-top: 5px; font-weight: 500;">${miniComp(curr, prev, 'Prev')}${miniComp(curr, next, 'Next')}</div></div>`;
+        }
+
+        function getBgHtml(key) {
+            const img = db.images.get(key);
+            if (img) return `<div class="row-bg" style="background-image: url('${img}');"></div>`;
+            return '';
+        }
+
+        // --- Defensive Formatting Modules ---
+        function formatReportTrackItem(item, prevMap, nextMap) {
+            try {
+                if (!item || !item[0]) return '';
+                const parts = item[0].split('|||');
+                const url = `https://www.last.fm/music/${encodeURIComponent(parts[1]||'Unknown')}/_/${encodeURIComponent(parts[0]||'Unknown')}`;
+                return `${getBgHtml(item[0])}<a href="${url}" target="_blank" class="item-link"><div class="item-primary">${parts[0]}</div><div class="item-secondary">${parts[1]}</div></a>${buildReportStatsRight(item[0], item[1], prevMap, nextMap)}`;
+            } catch(e) { return ''; }
+        }
+
+        function formatReportArtistItem(item, prevMap, nextMap) {
+            try {
+                if (!item || !item[0]) return '';
+                const url = `https://www.last.fm/music/${encodeURIComponent(item[0]||'Unknown')}`;
+                return `${getBgHtml(item[0])}<a href="${url}" target="_blank" class="item-link"><div class="item-primary">${item[0]}</div></a>${buildReportStatsRight(item[0], item[1], prevMap, nextMap)}`;
+            } catch(e) { return ''; }
+        }
+
+        function formatReportAlbumItem(item, prevMap, nextMap) {
+            try {
+                if (!item || !item[0]) return '';
+                const parts = item[0].split('|||');
+                const url = `https://www.last.fm/music/${encodeURIComponent(parts[1] || 'Unknown')}/${encodeURIComponent(parts[0]||'Unknown')}`;
+                return `${getBgHtml(item[0])}<a href="${url}" target="_blank" class="item-link"><div class="item-primary">${parts[0]}</div><div class="item-secondary">by ${parts[1] || 'Unknown Artist'}</div></a>${buildReportStatsRight(item[0], item[1], prevMap, nextMap)}`;
+            } catch(e) { return ''; }
+        }
+
+        function formatMissingItem(item, type, context) {
+            try {
+                if (!item || !item[0]) return '';
+                let primary, secondary, url;
+                if (type === 'track') {
+                    const parts = item[0].split('|||');
+                    primary = parts[0] || 'Unknown'; secondary = parts[1] || 'Unknown';
+                    url = `https://www.last.fm/music/${encodeURIComponent(secondary)}/_/${encodeURIComponent(primary)}`;
+                } else if (type === 'artist') {
+                    primary = item[0] || 'Unknown'; secondary = '';
+                    url = `https://www.last.fm/music/${encodeURIComponent(primary)}`;
+                } else if (type === 'album') {
+                    const parts = item[0].split('|||');
+                    primary = parts[0] || 'Unknown'; secondary = `by ${parts[1] || 'Unknown Artist'}`;
+                    url = `https://www.last.fm/music/${encodeURIComponent(parts[1] || 'Unknown')}/${encodeURIComponent(primary)}`;
+                }
+                const label = context === 'prev' ? 'in prev' : 'in next';
+                const secHtml = secondary ? `<div class="item-secondary">${secondary}</div>` : '';
+                return `${getBgHtml(item[0])}<a href="${url}" target="_blank" class="item-link"><div class="item-primary">${primary}</div>${secHtml}</a><div style="text-align:right;"><span class="val" style="background: transparent; border: 1px solid var(--border); color: var(--text-muted);">${item[1]} plays ${label}</span></div>`;
+            } catch(e) { return ''; }
+        }
+        
+        function formatTrackItem(item) {
+            try {
+                if (!item || !item[0]) return '';
+                const parts = item[0].split('|||');
+                const url = `https://www.last.fm/music/${encodeURIComponent(parts[1]||'Unknown')}/_/${encodeURIComponent(parts[0]||'Unknown')}`;
+                return `${getBgHtml(item[0])}<a href="${url}" target="_blank" class="item-link"><div class="item-primary">${parts[0]}</div><div class="item-secondary">${parts[1]}</div></a><span class="val">${item[1]}</span>`;
+            } catch(e) { return ''; }
+        }
+
+        function formatArtistItem(item) {
+            try {
+                if (!item || !item[0]) return '';
+                const url = `https://www.last.fm/music/${encodeURIComponent(item[0]||'Unknown')}`;
+                return `${getBgHtml(item[0])}<a href="${url}" target="_blank" class="item-link"><div class="item-primary">${item[0]}</div></a><span class="val">${item[1]}</span>`;
+            } catch(e) { return ''; }
+        }
+
+        function formatAlbumItem(item) {
+            try {
+                if (!item || !item[0]) return '';
+                const parts = item[0].split('|||');
+                const url = `https://www.last.fm/music/${encodeURIComponent(parts[1] || 'Unknown')}/${encodeURIComponent(parts[0]||'Unknown')}`;
+                return `${getBgHtml(item[0])}<a href="${url}" target="_blank" class="item-link"><div class="item-primary">${parts[0]}</div><div class="item-secondary">by ${parts[1] || 'Unknown'}</div></a><span class="val">${item[1]}</span>`;
+            } catch(e) { return ''; }
+        }
+
+        function formatForgottenItem(item) {
+            try {
+                if (!item || !item[0]) return '';
+                const parts = item[0].split('|||');
+                const url = `https://www.last.fm/music/${encodeURIComponent(parts[1]||'Unknown')}/_/${encodeURIComponent(parts[0]||'Unknown')}`;
+                const daysAgo = Math.floor((datasetNow - item[1]) / 86400);
+                const totalPlays = db.global.tracks.get(item[0]); 
+                return `${getBgHtml(item[0])}<a href="${url}" target="_blank" class="item-link"><div class="item-primary">${parts[0]}</div><div class="item-secondary">${parts[1]}</div></a><div style="text-align: right; min-width: 90px; pointer-events: none;"><span class="val">${daysAgo} days ago</span><div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px;">Played ${totalPlays} times</div></div>`;
+            } catch(e) { return ''; }
+        }
+
+        function formatHistoryItem(item) {
+            try {
+                if (!item || !item[0]) return '';
+                const parts = item[0].split('|||');
+                const title = parts[0], artist = parts[1], album = parts[2], dateStr = parts[3];
+                const url = `https://www.last.fm/music/${encodeURIComponent(artist)}/_/${encodeURIComponent(title)}`;
+                return `${getBgHtml(title+'|||'+artist)}<a href="${url}" target="_blank" class="item-link"><div class="item-primary">${title}</div><div class="item-secondary">${artist} &bull; ${album}</div></a><span class="val" style="background: transparent; border: 1px solid var(--border); color: var(--text-muted); z-index:1;">${dateStr}</span>`;
+            } catch(e) { return ''; }
+        }
+
+        // ==========================================
+        // UI & DASHBOARD BUILDING
+        // ==========================================
+        function buildUI() {
+            const nav = document.getElementById('tabNav');
+            const views = document.getElementById('tabViews');
+            nav.innerHTML = ''; views.innerHTML = ''; renderState.clear();
+
+            nav.innerHTML += `<button class="tab-btn active" onclick="switchTab('tab-main', this)">Overview</button>`;
+            
+            const topGlobalDay = getTop(db.global.days)[0] || ['N/A', 0];
+            const topGlobalYear = getTop(db.global.years)[0] || ['N/A', 0];
+            const globalStreak = calculateStreak(db.global.days);
+            const activeCurrentStreak = calculateCurrentStreak(db.global.days);
+
+            views.innerHTML += `
+                <div id="tab-main" class="tab-content active">
+                    <div class="stats-hero">
+                        <div class="stat-box"><div class="stat-label">Total Scrobbles</div><div class="stat-value">${db.global.total.toLocaleString()}</div></div>
+                        <div class="stat-box"><div class="stat-label">Time Listened</div><div class="stat-value">${formatDurationStr(db.global.totalDuration)}</div><div class="stat-sub">*Calculated via exact track metadata</div></div>
+                        <div class="stat-box"><div class="stat-label">Current Streak</div><div class="stat-value">${activeCurrentStreak} Days</div><div class="stat-sub">Active daily listening</div></div>
+                        <div class="stat-box"><div class="stat-label">Longest Streak</div><div class="stat-value">${globalStreak.count} Days</div><div class="stat-sub">${globalStreak.count > 1 ? `${globalStreak.start} to ${globalStreak.end}` : globalStreak.start}</div></div>
+                        <div class="stat-box"><div class="stat-label">Most Active Day</div><div class="stat-value">${topGlobalDay[1]}</div><div class="stat-sub">${topGlobalDay[0]}</div></div>
+                        <div class="stat-box"><div class="stat-label">Most Active Year</div><div class="stat-value">${topGlobalYear[1]}</div><div class="stat-sub">${topGlobalYear[0]}</div></div>
+                    </div>
+                    <div class="board-grid">
+                        ${createBoardHTML('out-g-tracks', 'Top Songs')}
+                        ${createBoardHTML('out-g-artists', 'Top Artists')}
+                        ${createBoardHTML('out-g-albums', 'Top Albums')}
+                    </div>
+                    ${aiBtnBottomHTML}
+                </div>
+            `;
+
+            const sortedYears = [...db.years.keys()].sort((a, b) => b - a); 
+            sortedYears.forEach(year => {
+                nav.innerHTML += `<button class="tab-btn" onclick="switchTab('tab-${year}', this)">${year}</button>`;
+                const yData = db.years.get(year);
+                
+                const topDay = getTop(yData.days)[0] || ['N/A', 0];
+                const yearStreak = calculateStreak(yData.days);
+                
+                let monthOptions = `<option value="ALL">Entire Year</option>`;
+                [...yData.months.keys()].sort().forEach(m => monthOptions += `<option value="${m}">${m}</option>`);
+
+                views.innerHTML += `
+                    <div id="tab-${year}" class="tab-content">
+                        <div class="stats-hero">
+                            <div class="stat-box"><div class="stat-label">Year Scrobbles</div><div class="stat-value">${yData.total.toLocaleString()}</div></div>
+                            <div class="stat-box"><div class="stat-label">Time Listened</div><div class="stat-value">${formatDurationStr(yData.totalDuration)}</div><div class="stat-sub">*Calculated via exact track metadata</div></div>
+                            <div class="stat-box"><div class="stat-label">Longest Streak</div><div class="stat-value">${yearStreak.count} Days</div><div class="stat-sub">${yearStreak.count > 1 ? `${yearStreak.start} to ${yearStreak.end}` : yearStreak.start}</div></div>
+                            <div class="stat-box"><div class="stat-label">Most Active Day</div><div class="stat-value">${topDay[1]}</div><div class="stat-sub">${topDay[0]}</div></div>
+                            <div class="stat-box">
+                                <div class="stat-label">Filter by Month</div>
+                                <select id="select-month-${year}" onchange="updateYearBoard('${year}', this.value)" style="width: 100%; margin-top: 5px;">${monthOptions}</select>
+                            </div>
+                        </div>
+                        <div class="board-grid">
+                            ${createBoardHTML(`out-${year}-tracks`, 'Top Songs')}
+                            ${createBoardHTML(`out-${year}-artists`, 'Top Artists')}
+                            ${createBoardHTML(`out-${year}-albums`, 'Top Albums')}
+                        </div>
+                        ${aiBtnBottomHTML}
+                    </div>
+                `;
+            });
+
+            nav.innerHTML += `<button class="tab-btn" onclick="switchTab('tab-reports', this)">Listening Reports</button>`;
+            views.innerHTML += `
+                <div id="tab-reports" class="tab-content">
+                    <div class="board" style="padding: 20px; margin-bottom: 25px; position: relative;">
+                        <h2 style="margin-top: 0;">Generate Last.fm Wrap-Up</h2>
+                        <div class="filters-row" style="margin-top: 15px;">
+                            <select id="report-type" class="search-input" onchange="updateReportDropdowns()">
+                                <option value="weeks">Weekly Report</option>
+                                <option value="months">Monthly Report</option>
+                                <option value="years">Yearly Report</option>
+                            </select>
+                            <select id="report-period" class="search-input" onchange="generateReport()"></select>
+                        </div>
+                    </div>
+                    <div id="report-output"></div>
+                </div>
+            `;
+
+            ['artist', 'album', 'song'].forEach(t => {
+                const title = t.charAt(0).toUpperCase() + t.slice(1);
+                nav.innerHTML += `<button class="tab-btn" onclick="switchTab('tab-${t}-rep', this)">${title} Reports</button>`;
+                views.innerHTML += `
+                    <div id="tab-${t}-rep" class="tab-content">
+                        <div class="board" style="padding: 20px; margin-bottom: 25px; position: relative;">
+                            <h2 style="margin-top: 0;">${title} Analytics Deep-Dive</h2>
+                            <div class="filters-row" style="margin-top: 15px;">
+                                <input type="text" id="${t}-rep-search" class="search-input" list="dl-${t}s" placeholder="Search ${title}..." onchange="updateEntityPeriods('${t}')" style="width: 250px;">
+                                <select id="${t}-rep-type" class="search-input" onchange="updateEntityPeriods('${t}')">
+                                    <option value="all">All-Time</option>
+                                    <option value="years">Yearly</option>
+                                    <option value="months">Monthly</option>
+                                    <option value="weeks">Weekly</option>
+                                </select>
+                                <select id="${t}-rep-period" class="search-input" onchange="generateEntityReport('${t}')" disabled><option>Select Period</option></select>
+                            </div>
+                        </div>
+                        <div id="${t}-rep-output"></div>
+                    </div>
+                `;
+            });
+
+            nav.innerHTML += `<button class="tab-btn" onclick="switchTab('tab-forgotten', this)">Forgotten Tracks</button>`;
+            views.innerHTML += `
+                <div id="tab-forgotten" class="tab-content">
+                    <div class="board-grid board-centered" style="grid-template-columns: 1fr;">
+                        ${createBoardHTML('out-forgotten-all', 'Complete Archive', true)}
+                    </div>
+                    ${aiBtnBottomHTML}
+                </div>
+            `;
+
+            nav.innerHTML += `<button class="tab-btn" onclick="switchTab('tab-history', this)">Scrobble History</button>`;
+            views.innerHTML += `
+                <div id="tab-history" class="tab-content">
+                    <div class="board-grid board-centered" style="grid-template-columns: 1fr;">
+                        <div class="board">
+                            <div class="board-header">
+                                <div class="board-header-top">
+                                    <h2>Complete Scrobble Timeline</h2>
+                                    <button class="btn-secondary" onclick="clearHistoryFilters()">Clear Filters</button>
+                                </div>
+                                <div class="filters-row">
+                                    <span id="count-history" class="result-count">Results found: 0</span>
+                                    <input type="text" id="hist-search" class="search-input search-text" placeholder="Search song, artist, or album..." oninput="debouncedFilterHistory()">
+                                    <input type="date" id="hist-start" class="search-input" title="Start Date" onchange="debouncedFilterHistory()">
+                                    <input type="date" id="hist-end" class="search-input" title="End Date" onchange="debouncedFilterHistory()">
+                                    <select id="hist-sort" class="search-input" onchange="debouncedFilterHistory()">
+                                        <option value="newest">Newest to Oldest</option>
+                                        <option value="oldest">Oldest to Newest</option>
+                                        <option value="az">A-Z</option>
+                                        <option value="za">Z-A</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="list-container tall"><ul id="out-history"></ul></div>
+                        </div>
+                    </div>
+                    ${aiBtnBottomHTML}
+                </div>
+            `;
+
+            initList('out-g-tracks', getTop(db.global.tracks), formatTrackItem);
+            initList('out-g-artists', getTop(db.global.artists), formatArtistItem);
+            initList('out-g-albums', getTop(db.global.albums), formatAlbumItem);
+
+            sortedYears.forEach(year => updateYearBoard(year, 'ALL'));
+            calculateCompleteArchive();
+            filterHistoryList(); 
+            updateReportDropdowns();
+        }
+
+        function createBoardHTML(id, title, isForgotten = false) {
+            const daysInputHTML = isForgotten 
+                ? `<input type="number" id="search-days-${id}" class="search-input search-days" placeholder="Days >=" value="180" oninput="debouncedFilterList('${id}')" min="0" title="Minimum days since last play">`
+                : '';
+                
+            const sortSelectHTML = isForgotten
+                ? '' // Removed sorting options for Forgotten Tracks tab
+                : `<select id="sort-${id}" class="search-input" onchange="debouncedFilterList('${id}')">
+                        <option value="desc">Top to Bottom</option>
+                        <option value="asc">Bottom to Top</option>
+                   </select>`;
+
+            return `
+                <div class="board">
+                    <div class="board-header">
+                        <div class="board-header-top">
+                            <h2>${title}</h2>
+                        </div>
+                        <div class="filters-row">
+                            <span id="count-${id}" class="result-count">Results found: 0</span>
+                            ${daysInputHTML}
+                            ${sortSelectHTML}
+                            <input type="text" id="search-${id}" class="search-input search-text" placeholder="Search..." oninput="debouncedFilterList('${id}')">
+                        </div>
+                    </div>
+                    <div class="list-container"><ul id="${id}"></ul></div>
+                </div>
+            `;
+        }
+
+        function switchTab(tabId, btnElement) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+            document.getElementById(tabId).classList.add('active');
+            btnElement.classList.add('active');
+            currentActiveTabId = tabId; 
+        }
+
+        window.updateYearBoard = function(year, monthKey) {
+            const yData = db.years.get(year);
+            const target = monthKey === 'ALL' ? yData : yData.monthData.get(monthKey);
+            initList(`out-${year}-tracks`, getTop(target.tracks), formatTrackItem);
+            initList(`out-${year}-artists`, getTop(target.artists), formatArtistItem);
+            initList(`out-${year}-albums`, getTop(target.albums), formatAlbumItem);
+        };
+
+        // --- Dynamic Generation Reports ---
+        window.updateReportDropdowns = function() {
+            const type = document.getElementById('report-type').value;
+            const periodSelect = document.getElementById('report-period');
+            periodSelect.innerHTML = '';
+
+            const keys = [...db.reports[type].keys()].sort((a, b) => b.localeCompare(a)); 
+            keys.forEach(k => {
+                const opt = document.createElement('option');
+                opt.value = k;
+                opt.innerText = k;
+                periodSelect.appendChild(opt);
+            });
+            generateReport();
+        };
+
+        window.generateReport = function() {
+            const type = document.getElementById('report-type').value;
+            const period = document.getElementById('report-period').value;
+            const out = document.getElementById('report-output');
+            
+            if (!period) { out.innerHTML = ''; return; }
+
+            const keys = [...db.reports[type].keys()].sort((a, b) => b.localeCompare(a));
+            const currentIndex = keys.indexOf(period);
+            const prevKey = keys[currentIndex + 1]; 
+            const nextKey = keys[currentIndex - 1]; 
+
+            const data = db.reports[type].get(period);
+            const prevData = prevKey ? db.reports[type].get(prevKey) : null;
+            const nextData = nextKey ? db.reports[type].get(nextKey) : null;
+
+            const topDay = getTop(data.days)[0] || ['N/A', 0];
+            const prevTopDay = prevData ? (getTop(prevData.days)[0] || ['N/A', 0]) : null;
+            const nextTopDay = nextData ? (getTop(nextData.days)[0] || ['N/A', 0]) : null;
+
+            let activeDays = data.days.size || 1; 
+            const avgPerDay = data.total / activeDays;
+            const prevAvg = prevData ? prevData.total / (prevData.days.size || 1) : null;
+            const nextAvg = nextData ? nextData.total / (nextData.days.size || 1) : null;
+
+            const streak = calculateStreak(data.days);
+            const prevStreak = prevData ? calculateStreak(prevData.days) : null;
+            const nextStreak = nextData ? calculateStreak(nextData.days) : null;
+
+            const missingPrevTracks = prevData ? getMissing(prevData.tracks, data.tracks) : [];
+            const missingPrevArtists = prevData ? getMissing(prevData.artists, data.artists) : [];
+            const missingPrevAlbums = prevData ? getMissing(prevData.albums, data.albums) : [];
+
+            const missingNextTracks = nextData ? getMissing(nextData.tracks, data.tracks) : [];
+            const missingNextArtists = nextData ? getMissing(nextData.artists, data.artists) : [];
+            const missingNextAlbums = nextData ? getMissing(nextData.albums, data.albums) : [];
+
+            // Fetch contextual history for the bottom board
+            const propMap = { 'years': 'year', 'months': 'month', 'weeks': 'week' };
+            const prop = propMap[type];
+            const currentHistory = db.history.filter(i => i[prop] === period);
+            const histData = currentHistory.map(i => [`${i.title}|||${i.artist}|||${i.album}|||${i.dateStr}|||${i.timestamp}`, i.timestamp]).sort((a,b) => b[1] - a[1]);
+
+            let repHTML = `
+                <div class="stats-hero">
+                    <div class="stat-box"><div class="stat-label">Total Scrobbles</div><div class="stat-value" style="margin-bottom: 5px;">${data.total.toLocaleString()}</div>${buildComparison(data.total, prevData ? prevData.total : null, 'previous')}${buildComparison(data.total, nextData ? nextData.total : null, 'next')}</div>
+                    <div class="stat-box"><div class="stat-label">Time Listened</div><div class="stat-value" style="margin-bottom: 5px;">${formatDurationStr(data.totalDuration)}</div>${buildComparison(data.totalDuration, prevData ? prevData.totalDuration : null, 'previous', true)}${buildComparison(data.totalDuration, nextData ? nextData.totalDuration : null, 'next', true)}</div>
+                    <div class="stat-box"><div class="stat-label">Daily Average</div><div class="stat-value">${avgPerDay.toFixed(1)}</div><div class="stat-sub" style="margin-bottom: 8px;">Across ${activeDays} active day(s)</div>${buildComparison(avgPerDay, prevAvg, 'previous')}${buildComparison(avgPerDay, nextAvg, 'next')}</div>
+                    <div class="stat-box"><div class="stat-label">Most Active Day</div><div class="stat-value">${topDay[1]} plays</div><div class="stat-sub" style="margin-bottom: 8px;">${topDay[0]}</div>${buildComparison(topDay[1], prevTopDay ? prevTopDay[1] : null, 'previous')}${buildComparison(topDay[1], nextTopDay ? nextTopDay[1] : null, 'next')}</div>
+                    <div class="stat-box"><div class="stat-label">Longest Streak</div><div class="stat-value" style="margin-bottom: 5px;">${streak.count} Days</div><div class="stat-sub" style="margin-bottom: 8px;">${streak.count > 1 ? `${streak.start} to ${streak.end}` : streak.start}</div>${buildComparison(streak.count, prevStreak ? prevStreak.count : null, 'previous')}${buildComparison(streak.count, nextStreak ? nextStreak.count : null, 'next')}</div>
+                </div>
+
+                <div class="section-title">Scrobbled in this Period</div>
+                <div class="board-grid">
+                    ${createBoardHTML('rep-tracks', 'All Tracks')}
+                    ${createBoardHTML('rep-artists', 'All Artists')}
+                    ${createBoardHTML('rep-albums', 'All Albums')}
+                </div>
+            `;
+
+            if (prevData && prevData.tracks.size > 0) {
+                repHTML += `<div class="section-title" style="color: var(--text-muted); margin-top: 40px;">Dropped since Previous Period</div><div class="board-grid">${createBoardHTML('rep-miss-prev-tracks', 'Dropped Tracks')}${createBoardHTML('rep-miss-prev-artists', 'Dropped Artists')}${createBoardHTML('rep-miss-prev-albums', 'Dropped Albums')}</div>`;
+            }
+
+            if (nextData && nextData.tracks.size > 0) {
+                repHTML += `<div class="section-title" style="color: var(--text-muted); margin-top: 40px;">Appeared in Next Period</div><div class="board-grid">${createBoardHTML('rep-miss-next-tracks', 'Missing Tracks')}${createBoardHTML('rep-miss-next-artists', 'Missing Artists')}${createBoardHTML('rep-miss-next-albums', 'Missing Albums')}</div>`;
+            }
+
+            repHTML += `
+                <div class="section-title" style="color: var(--text-muted); margin-top: 40px;">Scrobble History</div>
+                <div class="board-grid board-centered" style="grid-template-columns: 1fr;">
+                    ${createBoardHTML('rep-history', 'Raw Timeline')}
+                </div>
+            `;
+
+            out.innerHTML = repHTML + aiBtnBottomHTML;
+
+            initList('rep-tracks', getTop(data.tracks), (i) => formatReportTrackItem(i, prevData?.tracks, nextData?.tracks));
+            initList('rep-artists', getTop(data.artists), (i) => formatReportArtistItem(i, prevData?.artists, nextData?.artists));
+            initList('rep-albums', getTop(data.albums), (i) => formatReportAlbumItem(i, prevData?.albums, nextData?.albums));
+            initList('rep-history', histData, formatHistoryItem);
+
+            if (prevData) {
+                initList('rep-miss-prev-tracks', missingPrevTracks, (i) => formatMissingItem(i, 'track', 'prev'));
+                initList('rep-miss-prev-artists', missingPrevArtists, (i) => formatMissingItem(i, 'artist', 'prev'));
+                initList('rep-miss-prev-albums', missingPrevAlbums, (i) => formatMissingItem(i, 'album', 'prev'));
+            }
+
+            if (nextData) {
+                initList('rep-miss-next-tracks', missingNextTracks, (i) => formatMissingItem(i, 'track', 'next'));
+                initList('rep-miss-next-artists', missingNextArtists, (i) => formatMissingItem(i, 'artist', 'next'));
+                initList('rep-miss-next-albums', missingNextAlbums, (i) => formatMissingItem(i, 'album', 'next'));
+            }
+        };
+
+        window.updateEntityPeriods = function(type) {
+            const searchVal = document.getElementById(`${type}-rep-search`).value.toLowerCase();
+            const periodType = document.getElementById(`${type}-rep-type`).value;
+            const periodSelect = document.getElementById(`${type}-rep-period`);
+            periodSelect.innerHTML = '';
+            if (!searchVal) return;
+
+            let filtered = db.history.filter(i => {
+                if (type === 'artist') return i.artist.toLowerCase() === searchVal;
+                if (type === 'album') return `${i.album} - ${i.artist}`.toLowerCase() === searchVal;
+                if (type === 'song') return `${i.title} - ${i.artist}`.toLowerCase() === searchVal;
+            });
+
+            if (filtered.length === 0) return;
+
+            if (periodType === 'all') {
+                periodSelect.innerHTML = `<option value="all">All-Time</option>`;
+                periodSelect.disabled = true;
+            } else {
+                periodSelect.disabled = false;
+                const periods = new Set();
+                filtered.forEach(i => {
+                    if (periodType === 'years') periods.add(i.year);
+                    if (periodType === 'months') periods.add(i.month);
+                    if (periodType === 'weeks') periods.add(i.week);
+                });
+                
+                const sorted = [...periods].sort((a,b) => b.localeCompare(a));
+                sorted.forEach(p => {
+                    const opt = document.createElement('option');
+                    opt.value = p; opt.innerText = p;
+                    periodSelect.appendChild(opt);
+                });
+            }
+            generateEntityReport(type);
+        }
+
+        window.generateEntityReport = function(type) {
+            const searchVal = document.getElementById(`${type}-rep-search`).value.toLowerCase();
+            const periodType = document.getElementById(`${type}-rep-type`).value;
+            const periodVal = document.getElementById(`${type}-rep-period`).value;
+            const out = document.getElementById(`${type}-rep-output`);
+            if (!searchVal) { out.innerHTML = ''; return; }
+
+            const entityHistory = db.history.filter(i => {
+                if (type === 'artist') return i.artist.toLowerCase() === searchVal;
+                if (type === 'album') return `${i.album} - ${i.artist}`.toLowerCase() === searchVal;
+                if (type === 'song') return `${i.title} - ${i.artist}`.toLowerCase() === searchVal;
+            });
+
+            if (entityHistory.length === 0) {
+                out.innerHTML = '<div style="padding:20px;">No data found for this query.</div>';
+                return;
+            }
+
+            const currentHistory = periodType === 'all' ? entityHistory : entityHistory.filter(i => {
+                if (periodType === 'years') return i.year === periodVal;
+                if (periodType === 'months') return i.month === periodVal;
+                if (periodType === 'weeks') return i.week === periodVal;
+            });
+            if (currentHistory.length === 0) return; 
+
+            let prevHistory = [], nextHistory = [];
+            let prevKey = null, nextKey = null;
+
+            if (periodType !== 'all') {
+                const allKeys = [...db.reports[periodType].keys()].sort((a,b) => b.localeCompare(a));
+                const cIdx = allKeys.indexOf(periodVal);
+                if (cIdx !== -1) {
+                    prevKey = allKeys[cIdx + 1];
+                    nextKey = allKeys[cIdx - 1];
+                    if (prevKey) prevHistory = entityHistory.filter(i => {
+                        if (periodType === 'years') return i.year === prevKey;
+                        if (periodType === 'months') return i.month === prevKey;
+                        if (periodType === 'weeks') return i.week === prevKey;
+                    });
+                    if (nextKey) nextHistory = entityHistory.filter(i => {
+                        if (periodType === 'years') return i.year === nextKey;
+                        if (periodType === 'months') return i.month === nextKey;
+                        if (periodType === 'weeks') return i.week === nextKey;
+                    });
+                }
+            }
+
+            const total = currentHistory.length;
+            const prevTotal = prevKey ? prevHistory.length : null;
+            const nextTotal = nextKey ? nextHistory.length : null;
+
+            const totalDuration = currentHistory.reduce((acc, i) => acc + i.duration, 0);
+            const prevDuration = prevKey ? prevHistory.reduce((acc, i) => acc + i.duration, 0) : null;
+            const nextDuration = nextKey ? nextHistory.reduce((acc, i) => acc + i.duration, 0) : null;
+
+            const daysMap = new Map();
+            const tracksMap = new Map();
+            const albumsMap = new Map();
+
+            currentHistory.forEach(i => {
+                increment(daysMap, i.day);
+                increment(tracksMap, `${i.title}|||${i.artist}`);
+                increment(albumsMap, `${i.album}|||${i.artist}`);
+            });
+
+            const topDay = getTop(daysMap)[0] || ['N/A', 0];
+            const activeDays = daysMap.size || 1;
+            const avg = total / activeDays;
+
+            const prevDaysMap = new Map();
+            prevHistory.forEach(i => increment(prevDaysMap, i.day));
+            const prevAvg = prevKey ? prevTotal / (prevDaysMap.size || 1) : null;
+            const prevTopDay = prevKey ? (getTop(prevDaysMap)[0] || ['N/A', 0]) : null;
+
+            const nextDaysMap = new Map();
+            nextHistory.forEach(i => increment(nextDaysMap, i.day));
+            const nextAvg = nextKey ? nextTotal / (nextDaysMap.size || 1) : null;
+            const nextTopDay = nextKey ? (getTop(nextDaysMap)[0] || ['N/A', 0]) : null;
+
+            const streak = calculateStreak(daysMap);
+            const prevStreak = prevKey ? calculateStreak(prevDaysMap) : null;
+            const nextStreak = nextKey ? calculateStreak(nextDaysMap) : null;
+
+            let html = `
+                <div class="stats-hero">
+                    <div class="stat-box"><div class="stat-label">Total Scrobbles</div><div class="stat-value" style="margin-bottom: 5px;">${total.toLocaleString()}</div>${buildComparison(total, prevTotal, 'previous')}${buildComparison(total, nextTotal, 'next')}</div>
+                    <div class="stat-box"><div class="stat-label">Time Listened</div><div class="stat-value" style="margin-bottom: 5px;">${formatDurationStr(totalDuration)}</div>${buildComparison(totalDuration, prevDuration, 'previous', true)}${buildComparison(totalDuration, nextDuration, 'next', true)}</div>
+                    <div class="stat-box"><div class="stat-label">Daily Average</div><div class="stat-value">${avg.toFixed(1)}</div><div class="stat-sub" style="margin-bottom: 8px;">Across ${activeDays} active day(s)</div>${buildComparison(avg, prevAvg, 'previous')}${buildComparison(avg, nextAvg, 'next')}</div>
+                    <div class="stat-box"><div class="stat-label">Most Active Day</div><div class="stat-value">${topDay[1]} plays</div><div class="stat-sub" style="margin-bottom: 8px;">${topDay[0]}</div>${buildComparison(topDay[1], prevTopDay ? prevTopDay[1] : null, 'previous')}${buildComparison(topDay[1], nextTopDay ? nextTopDay[1] : null, 'next')}</div>
+                    <div class="stat-box"><div class="stat-label">Longest Streak</div><div class="stat-value" style="margin-bottom: 5px;">${streak.count} Days</div><div class="stat-sub" style="margin-bottom: 8px;">${streak.count > 1 ? `${streak.start} to ${streak.end}` : streak.start}</div>${buildComparison(streak.count, prevStreak ? prevStreak.count : null, 'previous')}${buildComparison(streak.count, nextStreak ? nextStreak.count : null, 'next')}</div>
+                </div>
+            `;
+
+            let boardsHtml = '';
+            if (type === 'artist') {
+                boardsHtml = `<div class="board-grid">${createBoardHTML(`ent-${type}-tracks`, 'Top Tracks')}${createBoardHTML(`ent-${type}-albums`, 'Top Albums')}</div>`;
+            } else if (type === 'album') {
+                boardsHtml = `<div class="board-grid board-centered" style="grid-template-columns: 1fr;">${createBoardHTML(`ent-${type}-tracks`, 'Top Tracks')}</div>`;
+            } 
+            
+            // Add History for all Entity types
+            boardsHtml += `
+                <div class="section-title" style="color: var(--text-muted); margin-top: 40px;">Scrobble History</div>
+                <div class="board-grid board-centered" style="grid-template-columns: 1fr;">
+                    ${createBoardHTML(`ent-${type}-history`, 'Raw Timeline')}
+                </div>
+            `;
+
+            out.innerHTML = html + boardsHtml + aiBtnBottomHTML;
+
+            const histData = currentHistory.map(i => [`${i.title}|||${i.artist}|||${i.album}|||${i.dateStr}|||${i.timestamp}`, i.timestamp]).sort((a,b) => b[1] - a[1]);
+
+            if (type === 'artist') {
+                initList(`ent-${type}-tracks`, getTop(tracksMap), formatTrackItem);
+                initList(`ent-${type}-albums`, getTop(albumsMap), formatAlbumItem);
+            } else if (type === 'album') {
+                initList(`ent-${type}-tracks`, getTop(tracksMap), formatTrackItem);
+            } 
+            
+            initList(`ent-${type}-history`, histData, formatHistoryItem);
+        }
+
+        // --- Core Interaction Triggers ---
+        function calculateCompleteArchive() {
+            const allForgotten = [...db.globalLastPlayed.entries()].sort((a, b) => a[1] - b[1]);
+            initList('out-forgotten-all', allForgotten, formatForgottenItem, true);
+        }
+        
+        window.debouncedFilterHistory = function() {
+            clearTimeout(histDebounceTimer);
+            histDebounceTimer = setTimeout(() => { filterHistoryList(); }, 300);
+        };
+
+        window.clearHistoryFilters = function() {
+            const hs = document.getElementById('hist-search'); if(hs) hs.value = '';
+            const hst = document.getElementById('hist-start'); if(hst) hst.value = '';
+            const he = document.getElementById('hist-end'); if(he) he.value = '';
+            const hso = document.getElementById('hist-sort'); if(hso) hso.value = 'newest';
+            filterHistoryList();
+        };
+
+        window.filterHistoryList = function() {
+            try {
+                const queryEl = document.getElementById('hist-search');
+                if (!queryEl) return;
+                const query = queryEl.value.toLowerCase();
+                const startInput = document.getElementById('hist-start').value;
+                const endInput = document.getElementById('hist-end').value;
+                const sortMode = document.getElementById('hist-sort').value;
+                
+                const startTs = startInput ? new Date(startInput).getTime() / 1000 : 0;
+                const endTs = endInput ? new Date(endInput).getTime() / 1000 + 86399 : Infinity;
+
+                let filtered = db.history.filter(item => {
+                    if (item.timestamp < startTs || item.timestamp > endTs) return false;
+                    if (query) {
+                        const searchStr = `${item.title} ${item.artist} ${item.album}`.toLowerCase();
+                        if (!searchStr.includes(query)) return false;
+                    }
+                    return true;
+                });
+
+                if (sortMode === 'newest') filtered.sort((a, b) => b.timestamp - a.timestamp);
+                else if (sortMode === 'oldest') filtered.sort((a, b) => a.timestamp - b.timestamp);
+                else if (sortMode === 'az') filtered.sort((a, b) => a.title.localeCompare(b.title));
+                else if (sortMode === 'za') filtered.sort((a, b) => b.title.localeCompare(a.title));
+
+                const countSpan = document.getElementById('count-history');
+                if (countSpan) countSpan.innerText = `Results found: ${filtered.length.toLocaleString()}`;
+
+                const ul = document.getElementById('out-history');
+                ul.innerHTML = '';
+                const fragment = document.createDocumentFragment();
+
+                for (const item of filtered) {
+                    const li = document.createElement('li');
+                    const url = `https://www.last.fm/music/${encodeURIComponent(item.artist)}/_/${encodeURIComponent(item.title)}`;
+                    const bgHtml = getBgHtml(`${item.title}|||${item.artist}`);
+                    li.innerHTML = `
+                        ${bgHtml}
+                        <a href="${url}" target="_blank" class="item-link" title="Open on Last.fm">
+                            <div class="item-primary">${item.title}</div>
+                            <div class="item-secondary">${item.artist} &bull; ${item.album}</div>
+                        </a>
+                        <span class="val" style="background: transparent; color: var(--text-muted); font-weight: normal; z-index:1;">${item.dateStr}</span>
+                    `;
+                    fragment.appendChild(li);
+                }
+                ul.appendChild(fragment);
+            } catch (err) {
+                console.error("Error filtering history:", err);
+            }
+        };
+        
+        window.debouncedFilterList = function(elementId) {
+            if (debounceTimers.has(elementId)) clearTimeout(debounceTimers.get(elementId));
+            debounceTimers.set(elementId, setTimeout(() => { filterList(elementId); }, 300));
+        };
+
+        function initList(elementId, dataArray, formatter, isForgottenList = false) {
+            renderState.set(elementId, { data: dataArray, formatter: formatter, isForgotten: isForgottenList });
+            const searchInput = document.getElementById(`search-${elementId}`); if (searchInput) searchInput.value = '';
+            const daysInput = document.getElementById(`search-days-${elementId}`); if (daysInput) daysInput.value = '';
+            filterList(elementId);
+        }
+
+        window.filterList = function(elementId) {
+            try {
+                const state = renderState.get(elementId);
+                if (!state) return;
+
+                const query = (document.getElementById(`search-${elementId}`)?.value || '').toLowerCase();
+                const daysInputStr = document.getElementById(`search-days-${elementId}`)?.value;
+                const minDays = daysInputStr !== '' && daysInputStr !== undefined ? parseInt(daysInputStr) : 0;
+                const sortOrder = document.getElementById(`sort-${elementId}`)?.value || 'desc';
+                
+                // 1. FILTER FIRST
+                let filteredData = [];
+                for (const item of state.data) {
+                    if (!item || !item[0]) continue;
+                    const searchText = item[0].replace('|||', ' ').toLowerCase();
+                    if (query && !searchText.includes(query)) continue;
+                    if (state.isForgotten && minDays > 0) {
+                        if (Math.floor((datasetNow - item[1]) / 86400) < minDays) continue;
+                    }
+                    filteredData.push(item);
+                }
+
+                // 2. SORT AFTER FILTERING
+                if (state.isForgotten) {
+                    filteredData.sort((a, b) => {
+                        const playsA = db.global.tracks.get(a[0]) || 0;
+                        const daysA = Math.floor((datasetNow - a[1]) / 86400);
+                        const playsB = db.global.tracks.get(b[0]) || 0;
+                        const daysB = Math.floor((datasetNow - b[1]) / 86400);
+                        return (playsB * daysB) - (playsA * daysA); // Score descending
+                    });
+                } else {
+                    if (sortOrder === 'asc') filteredData.reverse();
+                }
+
+                // 3. RENDER
+                const ul = document.getElementById(elementId);
+                if (!ul) return;
+                ul.innerHTML = '';
+                const fragment = document.createDocumentFragment();
+                let matchCount = 0;
+
+                for (const item of filteredData) {
+                    const htmlStr = state.formatter(item);
+                    if (htmlStr) {
+                        matchCount++;
+                        const li = document.createElement('li');
+                        li.innerHTML = htmlStr;
+                        fragment.appendChild(li);
+                    }
+                }
+                
+                const countSpan = document.getElementById(`count-${elementId}`);
+                if (countSpan) countSpan.innerText = `Results found: ${matchCount.toLocaleString()}`;
+                ul.appendChild(fragment);
+            } catch (err) {
+                console.error(`Error filtering list ${elementId}:`, err);
+            }
+        };
+
+        // --- AI Prompt Engine ---
+        function mapToAIString(mapArray, limit = 50) {
+            return mapArray.slice(0, limit).map((i, idx) => `${idx + 1}. ${(i[0]||'Unknown').replace('|||', ' by ')} (${i[1]} plays)`).join('\n');
+        }
+
+        window.generateCurrentTabAIPrompt = function() {
+            let prompt = '';
+            if (currentActiveTabId === 'tab-main') prompt = generateAIPromptMain();
+            else if (currentActiveTabId.startsWith('tab-20') || currentActiveTabId.startsWith('tab-19')) prompt = generateAIPromptYear(currentActiveTabId.replace('tab-', ''));
+            else if (currentActiveTabId === 'tab-reports') prompt = generateAIPromptReport();
+            else if (currentActiveTabId === 'tab-artist-rep') prompt = generateAIPromptEntity('artist');
+            else if (currentActiveTabId === 'tab-album-rep') prompt = generateAIPromptEntity('album');
+            else if (currentActiveTabId === 'tab-song-rep') prompt = generateAIPromptEntity('song');
+            else if (currentActiveTabId === 'tab-forgotten') prompt = generateAIPromptForgotten();
+            else if (currentActiveTabId === 'tab-history') prompt = generateAIPromptHistory();
+
+            if (!prompt) return;
+
+            navigator.clipboard.writeText(prompt).then(() => {
+                const toast = document.getElementById('toast');
+                toast.className = 'show';
+                setTimeout(() => { toast.className = toast.className.replace('show', ''); }, 3000);
+            }).catch(err => {
+                alert("Failed to copy prompt to clipboard. Please check browser permissions.");
+            });
+        };
+
+        function getBaseAIPrompt() {
+            return "Act as an expert music data analyst. I am providing you with my Last.fm scrobble statistics. Please provide a detailed, engaging analysis of my listening habits, identify my core genres, highlight interesting patterns, and give me personalized music recommendations based on this data.\n\n";
+        }
+
+        function generateAIPromptMain() {
+            let prompt = getBaseAIPrompt();
+            prompt += `--- ALL-TIME OVERVIEW ---\nTotal Scrobbles: ${db.global.total}\nTime Listened: ${formatDurationStr(db.global.totalDuration)}\nLongest Streak: ${calculateStreak(db.global.days).count} Days\nMost Active Day: ${(getTop(db.global.days)[0]||['N/A'])[0]}\nMost Active Month: ${(getTop(db.global.months)[0]||['N/A'])[0]}\nMost Active Year: ${(getTop(db.global.years)[0]||['N/A'])[0]}\n\n`;
+            prompt += `TOP 50 ARTISTS:\n${mapToAIString(getTop(db.global.artists))}\n\n`;
+            prompt += `TOP 50 TRACKS:\n${mapToAIString(getTop(db.global.tracks))}\n\n`;
+            prompt += `TOP 50 ALBUMS:\n${mapToAIString(getTop(db.global.albums))}\n`;
+            return prompt;
+        }
+
+        function generateAIPromptYear(yearParam) {
+            let prompt = getBaseAIPrompt();
+            const selectedMonth = document.getElementById(`select-month-${yearParam}`).value;
+            const data = selectedMonth === 'ALL' ? db.years.get(yearParam) : db.years.get(yearParam).monthData.get(selectedMonth);
+            const scope = selectedMonth === 'ALL' ? `Year ${yearParam}` : `Month ${selectedMonth}`;
+            prompt += `--- LISTENING STATS FOR: ${scope} ---\nTotal Scrobbles: ${data.total || data.tracks.size}\nTime Listened: ${formatDurationStr(data.totalDuration)}\nLongest Streak: ${calculateStreak(data.days).count} Days\n\n`;
+            prompt += `TOP 50 ARTISTS:\n${mapToAIString(getTop(data.artists))}\n\n`;
+            prompt += `TOP 50 TRACKS:\n${mapToAIString(getTop(data.tracks))}\n\n`;
+            prompt += `TOP 50 ALBUMS:\n${mapToAIString(getTop(data.albums))}\n`;
+            prompt += `\nPlease analyze how my taste evolved during this specific timeframe.`;
+            return prompt;
+        }
+
+        function generateAIPromptReport() {
+            const type = document.getElementById('report-type').value;
+            const period = document.getElementById('report-period').value;
+            if (!period) return null;
+
+            let prompt = getBaseAIPrompt();
+            const keys = [...db.reports[type].keys()].sort((a, b) => b.localeCompare(a));
+            const currentIndex = keys.indexOf(period);
+            const data = db.reports[type].get(period);
+            const prevData = keys[currentIndex + 1] ? db.reports[type].get(keys[currentIndex + 1]) : null;
+
+            prompt += `--- ${type.toUpperCase()} REPORT: ${period} ---\n`;
+            prompt += `Total Scrobbles: ${data.total}\nTime Listened: ${formatDurationStr(data.totalDuration)}\nDaily Average: ${(data.total / (data.days.size||1)).toFixed(1)}\nLongest Streak: ${calculateStreak(data.days).count} Days\nMost Active Day: ${(getTop(data.days)[0]||['N/A'])[0]} (${(getTop(data.days)[0]||['N/A',0])[1]} plays)\n\n`;
+            
+            if (prevData) {
+                prompt += `[PREVIOUS PERIOD CONTEXT]\nPeriod: ${keys[currentIndex + 1]}\nTotal: ${prevData.total}\nTime Listened: ${formatDurationStr(prevData.totalDuration)}\nDaily Average: ${(prevData.total / (prevData.days.size||1)).toFixed(1)}\n`;
+                const missingPrevTracks = getMissing(prevData.tracks, data.tracks);
+                if (missingPrevTracks.length > 0) {
+                    prompt += `TOP DROPPED TRACKS (Played last period, but 0 plays this period):\n${mapToAIString(missingPrevTracks, 10)}\n`;
+                }
+                prompt += `\n`;
+            }
+
+            prompt += `TOP 50 ARTISTS THIS PERIOD:\n${mapToAIString(getTop(data.artists))}\n\n`;
+            prompt += `TOP 50 TRACKS THIS PERIOD:\n${mapToAIString(getTop(data.tracks))}\n\n`;
+            prompt += `Please provide a comparative analysis of my listening momentum based on the previous and next period data provided, paying close attention to any tracks I dropped from my rotation.`;
+            return prompt;
+        }
+
+        function generateAIPromptEntity(type) {
+            const searchVal = document.getElementById(`${type}-rep-search`).value;
+            const periodVal = document.getElementById(`${type}-rep-period`).value;
+            if (!searchVal || !periodVal) return null;
+
+            let prompt = getBaseAIPrompt();
+            prompt += `--- ${type.toUpperCase()} DEEP DIVE ANALYSIS ---\nEntity: ${searchVal}\nTimeframe: ${periodVal}\n\n`;
+            prompt += `Based on this targeted report, please analyze my relationship with this specific ${type}. Discuss the intensity of my listening habits during this period.`;
+            return prompt;
+        }
+
+        function generateAIPromptForgotten() {
+            let prompt = getBaseAIPrompt();
+            const daysInput = document.getElementById('search-days-out-forgotten-all');
+            const minDays = daysInput && daysInput.value !== '' ? parseInt(daysInput.value) : 180;
+            let forgotten = [...db.globalLastPlayed.entries()]
+                .filter(entry => Math.floor((datasetNow - entry[1]) / 86400) >= minDays)
+                .sort((a, b) => {
+                    const playsA = db.global.tracks.get(a[0]) || 0;
+                    const daysA = Math.floor((datasetNow - a[1]) / 86400);
+                    const playsB = db.global.tracks.get(b[0]) || 0;
+                    const daysB = Math.floor((datasetNow - b[1]) / 86400);
+                    return (playsB * daysB) - (playsA * daysA);
+                });
+
+            prompt += `--- FORGOTTEN TRACKS ANALYSIS ---\n`;
+            if (minDays > 0) prompt += `Criteria: Tracks not played in at least ${minDays} days.\n\n`;
+            prompt += `Here are the top 50 songs that are gathering the most dust in my history (Oldest last-played first):\n\n`;
+            
+            prompt += forgotten.slice(0, 50).map((i, idx) => {
+                const daysAgo = Math.floor((datasetNow - i[1]) / 86400);
+                return `${idx + 1}. ${(i[0]||'Unknown').replace('|||', ' by ')} (Last played: ${daysAgo} days ago)`;
+            }).join('\n');
+            
+            prompt += `\n\nPlease analyze these forgotten tracks. Suggest why I might have stopped listening to them, remind me of their vibe/genre, and tell me which 3 I should revisit immediately.`;
+            return prompt;
+        }
+
+        function generateAIPromptHistory() {
+            let prompt = getBaseAIPrompt();
+            const query = document.getElementById('hist-search').value;
+            const startInput = document.getElementById('hist-start').value;
+            const endInput = document.getElementById('hist-end').value;
+            prompt += `--- RAW TIMELINE FILTER OVERVIEW ---\n`;
+            prompt += `I searched my raw timeline with the following filters:\nSearch Term: "${query || 'None'}"\nDate Range: ${startInput || 'Beginning'} to ${endInput || 'Present'}\n\n`;
+            prompt += `Please provide an analysis on my general listening behavior based on my previous prompts, as dumping the raw timeline is too large.`;
+            return prompt;
+        }
+    </script>
+</body>
+</html>
